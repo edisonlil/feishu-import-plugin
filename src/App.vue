@@ -1,25 +1,25 @@
 <script setup>
-import Form from './components/Form.vue'
+import ExcelImport from './components/ExcelImport.vue'
 </script>
 
 <template>
-  <main>
-    <h4>编辑 <code>src/App.vue</code> 并保存以重新加载</h4>
-    <Form />
-  </main>
+  <ExcelImport />
 </template>
 
-<style scoped>
-  main {
-    padding: 1rem;
-  }
-  h4 {
-    font-size: calc(1.275rem + 0.3vw);
-    margin-bottom: 1rem;
-  }
-  code {
-    font-size: 0.875em;
-    color: #d63384;
-    word-wrap: break-word;
-  }
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  background-color: #f8f9fa;
+}
+
+#app {
+  width: 100%;
+  height: 100vh;
+}
 </style>
