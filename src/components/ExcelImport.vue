@@ -117,6 +117,26 @@
         </div>
       </div>
 
+      <!-- 合并单元格处理策略 -->
+      <div class="merge-policy">
+        <h4 class="policy-title">合并单元格处理策略</h4>
+        <el-form label-width="140px" label-position="left" class="policy-form">
+          <el-form-item label="文本列：">
+            <el-radio-group v-model="mergePolicy.text" @change="onMergePolicyChange">
+              <el-radio label="fill">向下填充</el-radio>
+              <el-radio label="none">不处理</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="数字列：">
+            <el-select v-model="mergePolicy.number" style="width: 220px" @change="onMergePolicyChange">
+              <el-option label="向下填充" value="fill" />
+              <el-option label="平均值填充" value="average" />
+              <el-option label="递增填充（+1）" value="increment" />
+            </el-select>
+          </el-form-item>
+        </el-form>
+      </div>
+
       <!-- 更新模式设置 -->
       <div class="upsert-panel">
         <el-switch v-model="upsertEnabled" active-text="开启更新模式（存在则更新，不存在则新增）" />
@@ -211,6 +231,11 @@ const filteredTableColumns = ref({})
 // Upsert 设置
 const upsertEnabled = ref(false)
 const upsertKeyIndex = ref(null) // 作为匹配条件的 Excel 列索引
+// 合并单元格策略 + 原始矩阵数据
+const mergePolicy = ref({ text: 'fill', number: 'fill' })
+const rawMatrix = ref([]) // 包含表头在内的二维数组
+const rawMerges = ref([])
+const rawHeaders = ref([])
 
 // 计算属性
 const isMappingComplete = computed(() => {
@@ -263,15 +288,17 @@ const parseExcel = async () => {
   
   try {
     console.log('读取Excel文件...')
-    const data = await readExcelFile(uploadedFile.value)
-    console.log('Excel数据:', data)
+    const parsed = await readExcelFile(uploadedFile.value)
+    console.log('Excel原始矩阵:', parsed)
     
-    if (!data || data.length === 0) {
+    if (!parsed || !parsed.matrix || parsed.matrix.length === 0) {
       throw new Error('Excel文件为空或格式不正确')
     }
-    
-    excelData.value = data
-    excelColumns.value = Object.keys(data[0] || {})
+    rawMatrix.value = parsed.matrix
+    rawMerges.value = parsed.merges || []
+    rawHeaders.value = parsed.headers || (parsed.matrix[0] || [])
+    // 根据策略重建行对象数据
+    rebuildDataFromPolicy()
     console.log('Excel列名:', excelColumns.value)
     
     // 获取当前表格的列信息
@@ -318,7 +345,7 @@ const parseExcel = async () => {
     }
     
     currentStep.value = 2
-    ElMessage.success(`文件解析成功！共 ${data.length} 行数据，${excelColumns.value.length} 列`)
+    ElMessage.success(`文件解析成功！共 ${excelData.value.length} 行数据，${excelColumns.value.length} 列`)
   } catch (error) {
     console.error('解析失败:', error)
     ElMessage.error('文件解析失败: ' + error.message)
@@ -362,10 +389,21 @@ const readExcelFile = (file) => {
         }
         
         console.log('开始转换为JSON...')
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, { 
+        let jsonData = XLSX.utils.sheet_to_json(worksheet, { 
           header: 1, // 使用数字作为列名
           defval: '' // 空单元格的默认值
         })
+
+        // 处理合并单元格：将合并区域内的空单元格填充为首格的值
+        try {
+          const merges = worksheet['!merges'] || []
+          if (merges.length > 0) {
+            console.log('检测到合并区域数量:', merges.length)
+            jsonData = fillMergedCells(jsonData, merges)
+          }
+        } catch (mergeErr) {
+          console.warn('处理合并单元格时出现问题（已忽略）：', mergeErr)
+        }
         
         console.log('JSON转换完成，数据行数:', jsonData.length)
         
@@ -373,20 +411,15 @@ const readExcelFile = (file) => {
           throw new Error('Excel文件中没有数据')
         }
         
-        // 将第一行作为列名，其余作为数据
-        const headers = jsonData[0]
+        // 返回更丰富的结构，便于策略重建
+        const headers = jsonData[0] || []
         const dataRows = jsonData.slice(1)
-        
-        const result = dataRows.map(row => {
-          const obj = {}
-          headers.forEach((header, index) => {
-            obj[header || `列${index + 1}`] = row[index] || ''
-          })
-          return obj
+        resolve({
+          matrix: jsonData,
+          headers,
+          rows: dataRows,
+          merges: worksheet['!merges'] || []
         })
-        
-        console.log('数据处理完成，最终数据:', result)
-        resolve(result)
       } catch (error) {
         console.error('Excel解析错误:', error)
         reject(new Error('Excel文件解析失败: ' + error.message))
@@ -405,6 +438,120 @@ const readExcelFile = (file) => {
     // 尝试二进制方式读取
     reader.readAsBinaryString(file)
   })
+}
+
+// 将合并区域的首格值下填到区域内空单元格
+const fillMergedCells = (matrix, merges) => {
+  // 深拷贝二维数组，避免就地修改带来副作用
+  const data = matrix.map(row => row.slice())
+  merges.forEach(range => {
+    const { s, e } = range // s: start {r,c}, e: end {r,c}
+    const startRow = s.r, startCol = s.c
+    const endRow = e.r, endCol = e.c
+    const topLeft = (data[startRow] && data[startRow][startCol]) !== undefined ? data[startRow][startCol] : ''
+    for (let r = startRow; r <= endRow; r++) {
+      // 确保行存在
+      if (!data[r]) data[r] = []
+      for (let c = startCol; c <= endCol; c++) {
+        const cur = data[r][c]
+        if (cur === undefined || cur === null || cur === '') {
+          data[r][c] = topLeft
+        }
+      }
+    }
+  })
+  return data
+}
+
+// 根据策略从原始矩阵生成 excelData/excelColumns
+const rebuildDataFromPolicy = () => {
+  // 拿原始矩阵（包含表头）
+  let matrix = rawMatrix.value
+  const headers = rawHeaders.value
+  const merges = rawMerges.value
+
+  // 先从未处理矩阵开始，再按策略处理（对合并区域进行不同策略）
+  let processed = matrix.map(row => row.slice())
+
+  if (merges && merges.length) {
+    // 文本策略
+    if (mergePolicy.value.text === 'fill') {
+      processed = fillMergedCells(processed, merges)
+    }
+    // 数字策略
+    if (mergePolicy.value.number !== 'none') {
+      processed = applyNumberMergeStrategy(processed, merges, mergePolicy.value.number)
+    }
+  }
+
+  // 构建行为对象
+  const hdr = headers
+  const dataRows = processed.slice(1)
+  excelColumns.value = hdr
+  excelData.value = dataRows.map(row => {
+    const obj = {}
+    hdr.forEach((h, i) => {
+      obj[h || `列${i + 1}`] = row[i] ?? ''
+    })
+    return obj
+  })
+}
+
+// 对数字列的合并区域应用策略：fill/average/increment
+const applyNumberMergeStrategy = (matrix, merges, mode) => {
+  const data = matrix.map(r => r.slice())
+  merges.forEach(range => {
+    const { s, e } = range
+    const startRow = s.r, startCol = s.c
+    const endRow = e.r, endCol = e.c
+
+    // 检测首格是否为数字
+    const top = data[startRow]?.[startCol]
+    const topNum = Number(top)
+    const isNum = !isNaN(topNum)
+    console.log('检测首格是否为数字:'+isNum + ' 首格值:'+top + 'mode:'+mode)
+    if (!isNum) return
+
+    mode = 'average'
+    if (mode === 'fill') {
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          const cur = data[r][c]
+          if (cur === undefined || cur === null || cur === '') data[r][c] = topNum
+        }
+      }
+    } else if (mode === 'average') {
+      // 计算区域内已有数字的平均值，否则用首格
+      let sum = 0, count = 0
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          const v = Number(data[r][c])
+          if (!isNaN(v)) { sum += v; count++ }
+        }
+      }
+      console.log('sum:'+sum + ' count:'+count)
+      const avg = count > 0 ? sum / count : topNum
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          const cur = data[r][c]
+          console.log('avg:'+avg)
+          if (cur === undefined || cur === null || cur === '') data[r][c] = avg
+        }
+      }
+    } else if (mode === 'increment') {
+      // 按行优先递增：首格为 topNum，后续单元依次 +1
+      let val = topNum
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          if (r === startRow && c === startCol) continue
+          val += 1
+          const cur = data[r][c]
+          if (cur === undefined || cur === null || cur === '') data[r][c] = val
+        }
+      }
+    }
+  })
+  return data
 }
 
 const loadTableColumns = async () => {
