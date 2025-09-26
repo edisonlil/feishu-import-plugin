@@ -61,9 +61,27 @@
     <div v-if="currentStep === 2" class="step-content">
       <h3>建立列对应关系</h3>
       <p class="step-description">请将Excel列与多维表格列进行对应</p>
+      <div class="search-tip">
+        <el-alert
+          title="💡 搜索提示"
+          type="info"
+          :closable="false"
+          show-icon
+        >
+          <template #default>
+            <p>您可以在下拉框中输入关键词进行搜索：</p>
+            <ul>
+              <li>输入完整列名：如"姓名"</li>
+              <li>输入部分关键词：如"名"</li>
+              <li>输入拼音首字母：如"xm"（姓名）</li>
+            </ul>
+          </template>
+        </el-alert>
+      </div>
       
       <div class="mapping-container">
-        <div class="mapping-item" v-for="(excelCol, index) in excelColumns" :key="index">
+        <div class="mapping-item" v-for="(excelCol, index) in excelColumns" :key="index" 
+             :class="{ 'auto-matched': columnMapping[index] }">
           <div class="excel-column">
             <span class="column-label">Excel列:</span>
             <el-tag type="info">{{ excelCol }}</el-tag>
@@ -73,17 +91,27 @@
             <span class="column-label">多维表格列:</span>
             <el-select 
               v-model="columnMapping[index]" 
-              placeholder="请选择对应列"
+              placeholder="请选择对应列（支持输入搜索）"
               style="width: 200px"
+              filterable
+              clearable
+              remote
+              :remote-method="(query) => filterTableColumns(query, index)"
+              :loading="false"
+              no-data-text="没有找到匹配的列"
+              no-match-text="没有找到匹配的列"
             >
               <el-option
-                v-for="tableCol in tableColumns"
+                v-for="tableCol in filteredTableColumns[index] || tableColumns"
                 :key="tableCol.id"
                 :label="tableCol.name"
                 :value="tableCol.id"
                 :disabled="isColumnMapped(tableCol.id, index)"
               />
             </el-select>
+            <el-tag v-if="columnMapping[index]" type="success" size="small" style="margin-left: 8px">
+              已匹配
+            </el-tag>
           </div>
         </div>
       </div>
@@ -150,6 +178,7 @@ const previewData = ref([])
 const parsing = ref(false)
 const importing = ref(false)
 const importResult = ref({ successCount: 0, errorCount: 0 })
+const filteredTableColumns = ref({})
 
 // 计算属性
 const isMappingComplete = computed(() => {
@@ -208,8 +237,43 @@ const parseExcel = async () => {
     await loadTableColumns()
     console.log('表格列信息:', tableColumns.value)
     
-    // 初始化列映射
+    // 初始化列映射，智能匹配相同名称的列
     columnMapping.value = new Array(excelColumns.value.length).fill(null)
+    
+    // 智能匹配：支持多种匹配模式
+    excelColumns.value.forEach((excelCol, index) => {
+      const matchedColumn = tableColumns.value.find(tableCol => {
+        const excelName = excelCol.trim()
+        const tableName = tableCol.name.trim()
+        
+        // 1. 完全匹配
+        if (tableName === excelName) return true
+        
+        // 2. 忽略大小写匹配
+        if (tableName.toLowerCase() === excelName.toLowerCase()) return true
+        
+        // 3. 忽略空格和特殊字符匹配
+        const normalizeExcel = excelName.replace(/[\s\-_]/g, '').toLowerCase()
+        const normalizeTable = tableName.replace(/[\s\-_]/g, '').toLowerCase()
+        if (normalizeTable === normalizeExcel) return true
+        
+        // 4. 包含匹配（Excel列名包含在表格列名中，或反之）
+        if (tableName.includes(excelName) || excelName.includes(tableName)) return true
+        
+        return false
+      })
+      
+      if (matchedColumn) {
+        columnMapping.value[index] = matchedColumn.id
+        console.log(`智能匹配: "${excelCol}" -> "${matchedColumn.name}"`)
+      }
+    })
+    
+    // 显示匹配结果
+    const matchedCount = columnMapping.value.filter(mapping => mapping !== null).length
+    if (matchedCount > 0) {
+      ElMessage.success(`智能匹配成功！已自动匹配 ${matchedCount} 个列`)
+    }
     
     currentStep.value = 2
     ElMessage.success(`文件解析成功！共 ${data.length} 行数据，${excelColumns.value.length} 列`)
@@ -345,6 +409,99 @@ const isColumnMapped = (columnId, currentIndex) => {
   return columnMapping.value.some((mapping, index) => 
     mapping === columnId && index !== currentIndex
   )
+}
+
+const filterTableColumns = (query, index) => {
+  if (!query || query.trim() === '') {
+    filteredTableColumns.value[index] = tableColumns.value
+    return
+  }
+  
+  const searchQuery = query.toLowerCase().trim()
+  const filtered = tableColumns.value.filter(tableCol => {
+    const name = tableCol.name.toLowerCase()
+    
+    // 1. 完全匹配
+    if (name === searchQuery) return true
+    
+    // 2. 包含匹配
+    if (name.includes(searchQuery)) return true
+    
+    // 3. 开头匹配
+    if (name.startsWith(searchQuery)) return true
+    
+    // 4. 拼音首字母匹配
+    const pinyinInitials = getPinyinInitials(tableCol.name).toLowerCase()
+    if (pinyinInitials.includes(searchQuery)) return true
+    
+    return false
+  })
+  
+  // 按匹配度排序
+  filtered.sort((a, b) => {
+    const aName = a.name.toLowerCase()
+    const bName = b.name.toLowerCase()
+    
+    // 完全匹配优先
+    if (aName === searchQuery && bName !== searchQuery) return -1
+    if (bName === searchQuery && aName !== searchQuery) return 1
+    
+    // 开头匹配次优先
+    if (aName.startsWith(searchQuery) && !bName.startsWith(searchQuery)) return -1
+    if (bName.startsWith(searchQuery) && !aName.startsWith(searchQuery)) return 1
+    
+    // 其他按字母顺序
+    return aName.localeCompare(bName)
+  })
+  
+  filteredTableColumns.value[index] = filtered
+}
+
+// 简单的拼音首字母提取（可以后续优化为更完整的拼音库）
+const getPinyinInitials = (text) => {
+  // 这里是一个简单的实现，实际项目中可以使用完整的拼音库
+  const pinyinMap = {
+    // 基础信息
+    '姓名': 'xm', '名字': 'mz', '用户': 'yh', '客户': 'kh', '人员': 'ry',
+    '联系': 'lx', '信息': 'xx', '资料': 'zl', '档案': 'da',
+    
+    // 联系方式
+    '电话': 'dh', '手机': 'sj', '邮箱': 'yx', '地址': 'dz', '邮编': 'yb',
+    '传真': 'cz', 'QQ': 'qq', '微信': 'wx', '微博': 'wb',
+    
+    // 组织信息
+    '部门': 'bm', '职位': 'zw', '公司': 'gs', '单位': 'dw', '机构': 'jg',
+    '团队': 'td', '小组': 'xz', '科室': 'ks', '车间': 'cj',
+    
+    // 财务信息
+    '金额': 'je', '价格': 'jg', '费用': 'fy', '成本': 'cb', '收入': 'sr',
+    '支出': 'zc', '利润': 'lr', '预算': 'ys', '报销': 'bx',
+    
+    // 时间信息
+    '日期': 'rq', '时间': 'sj', '开始': 'ks', '结束': 'js', '创建': 'cj',
+    '更新': 'gx', '修改': 'xg', '删除': 'sc', '完成': 'wc',
+    
+    // 状态信息
+    '状态': 'zt', '备注': 'bz', '说明': 'sm', '描述': 'ms', '详情': 'xq',
+    '类型': 'lx', '分类': 'fl', '标签': 'bq', '标记': 'bj',
+    
+    // 其他常用
+    '编号': 'bh', '代码': 'dm', 'ID': 'id', '序号': 'xh', '排序': 'px',
+    '等级': 'dj', '级别': 'jb', '权限': 'qx', '角色': 'js'
+  }
+  
+  // 直接匹配
+  if (pinyinMap[text]) return pinyinMap[text]
+  
+  // 部分匹配（查找包含的词汇）
+  for (const [key, value] of Object.entries(pinyinMap)) {
+    if (text.includes(key)) {
+      return value
+    }
+  }
+  
+  // 默认返回原文本
+  return text
 }
 
 const getTableColumnName = (columnId) => {
@@ -531,7 +688,7 @@ onMounted(async () => {
 }
 
 .step.completed:not(:last-child)::after {
-  background-color: #00d4aa;
+  background-color: #1890ff;
 }
 
 .step-number {
@@ -550,12 +707,12 @@ onMounted(async () => {
 }
 
 .step.active .step-number {
-  background-color: #00d4aa;
+  background-color: #1890ff;
   color: white;
 }
 
 .step.completed .step-number {
-  background-color: #00d4aa;
+  background-color: #1890ff;
   color: white;
 }
 
@@ -568,7 +725,7 @@ onMounted(async () => {
 }
 
 .step.active .step-title {
-  color: #00d4aa;
+  color: #1890ff;
   font-weight: 600;
 }
 
@@ -591,6 +748,24 @@ onMounted(async () => {
   color: #646a73;
   margin-bottom: 16px;
   font-size: 14px;
+}
+
+.search-tip {
+  margin-bottom: 20px;
+}
+
+.search-tip :deep(.el-alert__content) {
+  font-size: 13px;
+}
+
+.search-tip :deep(.el-alert__content ul) {
+  margin: 8px 0 0 0;
+  padding-left: 20px;
+}
+
+.search-tip :deep(.el-alert__content li) {
+  margin: 4px 0;
+  color: #646a73;
 }
 
 .upload-demo {
@@ -616,6 +791,13 @@ onMounted(async () => {
   border-radius: 6px;
   background-color: #fafafa;
   gap: 12px;
+  transition: all 0.3s ease;
+}
+
+.mapping-item.auto-matched {
+  border-color: #1890ff;
+  background-color: #f0f8ff;
+  box-shadow: 0 2px 4px rgba(24, 144, 255, 0.1);
 }
 
 .excel-column, .table-column {
@@ -634,7 +816,7 @@ onMounted(async () => {
 
 .mapping-arrow {
   font-size: 16px;
-  color: #00d4aa;
+  color: #1890ff;
   font-weight: bold;
   margin: 0 8px;
 }
@@ -662,12 +844,12 @@ onMounted(async () => {
 
 .success-icon {
   font-size: 48px;
-  color: #00d4aa;
+  color: #1890ff;
   margin-bottom: 12px;
 }
 
 .success-result h3 {
-  color: #00d4aa;
+  color: #1890ff;
   margin-bottom: 8px;
   font-size: 18px;
 }
@@ -688,7 +870,7 @@ onMounted(async () => {
 }
 
 :deep(.el-upload-dragger:hover) {
-  border-color: #00d4aa;
+  border-color: #1890ff;
 }
 
 :deep(.el-button) {
@@ -697,13 +879,13 @@ onMounted(async () => {
 }
 
 :deep(.el-button--primary) {
-  background-color: #00d4aa;
-  border-color: #00d4aa;
+  background-color: #1890ff;
+  border-color: #1890ff;
 }
 
 :deep(.el-button--primary:hover) {
-  background-color: #00b894;
-  border-color: #00b894;
+  background-color: #40a9ff;
+  border-color: #40a9ff;
 }
 
 :deep(.el-select) {
