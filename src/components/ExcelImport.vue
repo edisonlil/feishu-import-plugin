@@ -512,7 +512,7 @@ const applyNumberMergeStrategy = (matrix, merges, mode) => {
     console.log('检测首格是否为数字:'+isNum + ' 首格值:'+top + 'mode:'+mode)
     if (!isNum) return
 
-    mode = 'average'
+    // 移除硬编码的mode='average'，使用传入的mode参数
     if (mode === 'fill') {
       for (let r = startRow; r <= endRow; r++) {
         for (let c = startCol; c <= endCol; c++) {
@@ -521,21 +521,16 @@ const applyNumberMergeStrategy = (matrix, merges, mode) => {
         }
       }
     } else if (mode === 'average') {
-      // 计算区域内已有数字的平均值，否则用首格
-      let sum = 0, count = 0
+      // 计算合并行的首个单元格的值除以合并行数
+      const mergeRowCount = endRow - startRow + 1 // 计算合并的行数
+      const avg = mergeRowCount > 0 ? topNum / mergeRowCount : topNum
+      console.log('首格值:'+topNum + ' 合并行数:'+mergeRowCount + ' 平均值:'+avg)
+      
+      // 应用平均值到整个合并区域
       for (let r = startRow; r <= endRow; r++) {
         for (let c = startCol; c <= endCol; c++) {
-          const v = Number(data[r][c])
-          if (!isNaN(v)) { sum += v; count++ }
-        }
-      }
-      console.log('sum:'+sum + ' count:'+count)
-      const avg = count > 0 ? sum / count : topNum
-      for (let r = startRow; r <= endRow; r++) {
-        for (let c = startCol; c <= endCol; c++) {
-          const cur = data[r][c]
-          console.log('avg:'+avg)
-          if (cur === undefined || cur === null || cur === '') data[r][c] = avg
+          // 修改：应用到整个合并区域，不只是空单元格
+          data[r][c] = avg
         }
       }
     } else if (mode === 'increment') {
@@ -922,6 +917,17 @@ onMounted(async () => {
   // 初始化时获取表格列信息
   await loadTableColumns()
 })
+
+// 定义onMergePolicyChange函数，当合并策略改变时重新构建数据
+const onMergePolicyChange = () => {
+  console.log('合并策略已更改:', mergePolicy.value)
+  // 重新根据策略构建数据
+  rebuildDataFromPolicy()
+  // 如果当前在预览步骤，也需要更新预览数据
+  if (currentStep.value === 3) {
+    generatePreviewData()
+  }
+}
 </script>
 
 <style scoped>
@@ -1102,7 +1108,7 @@ onMounted(async () => {
   border: 1px solid #e4e7ed;
   border-radius: 6px;
   overflow: hidden;
-  max-height: 300px;
+  max-height: 600px;
   overflow-y: auto;
 }
 
