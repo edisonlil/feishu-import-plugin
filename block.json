@@ -1,0 +1,7 @@
+{
+  "blockTypeID": "blk_68d6608ecb06c01c6f77ed52",
+  "name": "增量导入",
+  "description": "多维表格支持Excel增量导入",
+  "version": "1.0.0",
+  "url": "你的多维表格调试链接（可选）"
+}
