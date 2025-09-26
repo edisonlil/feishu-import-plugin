@@ -80,6 +80,7 @@
       </div>
       
       <div class="mapping-container">
+        <p class="step-description" style="margin-top:-4px">未选择映射的 Excel 列将在导入时被忽略，不会影响后续步骤。</p>
         <div class="mapping-item" v-for="(excelCol, index) in excelColumns" :key="index" 
              :class="{ 'auto-matched': columnMapping[index] }">
           <div class="excel-column">
@@ -115,10 +116,38 @@
           </div>
         </div>
       </div>
+
+      <!-- 更新模式设置 -->
+      <div class="upsert-panel">
+        <el-switch v-model="upsertEnabled" active-text="开启更新模式（存在则更新，不存在则新增）" />
+        <div v-if="upsertEnabled" class="upsert-config">
+          <el-form label-position="left" label-width="120px">
+            <el-form-item label="条件列（Excel 列）">
+              <el-select
+                v-model="upsertKeyIndex"
+                placeholder="请选择用作匹配条件的 Excel 列"
+                filterable
+                style="width: 320px"
+              >
+                <el-option
+                  v-for="(name, idx) in excelColumns"
+                  :key="idx"
+                  :label="name"
+                  :value="idx"
+                />
+              </el-select>
+              <div class="upsert-hint" v-if="upsertKeyIndex !== null">
+                <el-tag v-if="columnMapping[upsertKeyIndex]" type="success" size="small">已映射到字段：{{ getTableColumnName(columnMapping[upsertKeyIndex]) }}</el-tag>
+                <el-tag v-else type="warning" size="small">请为该 Excel 列选择对应的多维表格列</el-tag>
+              </div>
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
       
       <div class="step-actions">
         <el-button @click="prevStep">上一步</el-button>
-        <el-button type="primary" @click="nextStep" :disabled="!isMappingComplete">
+        <el-button type="primary" @click="nextStep" :disabled="!canProceedMappingStep">
           下一步
         </el-button>
       </div>
@@ -179,10 +208,23 @@ const parsing = ref(false)
 const importing = ref(false)
 const importResult = ref({ successCount: 0, errorCount: 0 })
 const filteredTableColumns = ref({})
+// Upsert 设置
+const upsertEnabled = ref(false)
+const upsertKeyIndex = ref(null) // 作为匹配条件的 Excel 列索引
 
 // 计算属性
 const isMappingComplete = computed(() => {
   return columnMapping.value.every(mapping => mapping !== null && mapping !== undefined)
+})
+
+// 是否允许从映射步骤进入下一步：
+// - 常规模式：任何映射数量都可（可为空，表示全部忽略）
+// - 更新模式：要求已选择条件列，且该列已映射到有效字段
+const canProceedMappingStep = computed(() => {
+  if (!upsertEnabled.value) return true
+  if (upsertKeyIndex.value === null || upsertKeyIndex.value === undefined) return false
+  const mappedField = columnMapping.value[upsertKeyIndex.value]
+  return !!mappedField
 })
 
 // 方法
@@ -511,6 +553,18 @@ const getTableColumnName = (columnId) => {
 
 const nextStep = () => {
   if (currentStep.value === 2) {
+    // 校验 Upsert 条件
+    if (upsertEnabled.value) {
+      if (upsertKeyIndex.value === null || upsertKeyIndex.value === undefined) {
+        ElMessage.warning('请先在更新模式中选择用于匹配的 Excel 条件列')
+        return
+      }
+      const mappedField = columnMapping.value[upsertKeyIndex.value]
+      if (!mappedField) {
+        ElMessage.warning('条件列未映射到多维表格字段，请先完成映射')
+        return
+      }
+    }
     // 生成预览数据
     generatePreviewData()
   }
@@ -564,6 +618,50 @@ const importData = async () => {
     }
     let successCount = 0
     let errorCount = 0
+
+    // 若启用更新模式：构建现有记录索引（keyValue -> recordId）
+    let upsertFieldId = null
+    let existingIndex = null
+    const makeKeyVariants = (val) => {
+      if (val === undefined || val === null) return []
+      const s = String(val).trim()
+      const lower = s.toLowerCase()
+      const sanitized = lower.replace(/[^a-z0-9\u4e00-\u9fa5]/g, '') // 去除非中英文与数字
+      return Array.from(new Set([s, lower, sanitized]))
+    }
+    const isAutoNumberField = (fieldId) => {
+      const col = tableColumns.value.find(c => c.id === fieldId)
+      const n = (col?.name || '').toLowerCase()
+      return n.includes('自动编号') || n.includes('auto')
+    }
+    if (upsertEnabled.value) {
+      upsertFieldId = columnMapping.value[upsertKeyIndex.value]
+      try {
+        const recordIds = await table.getRecordIdList()
+        const upsertField = await table.getFieldById(upsertFieldId)
+        existingIndex = new Map()
+        // 注意：大量数据时可能较慢，可按需优化分页/视图过滤
+        for (const rid of recordIds) {
+          try {
+            const cellStr = await upsertField.getCellString(rid)
+            const variants = makeKeyVariants(cellStr)
+            for (const k of variants) {
+              if (k) {
+                if (!existingIndex.has(k)) existingIndex.set(k, rid)
+              }
+            }
+          } catch (e) {
+            // 忽略单元读取错误，继续
+          }
+        }
+        console.log('已建立索引，条目数:', existingIndex.size)
+      } catch (e) {
+        console.error('构建更新索引失败：', e)
+        ElMessage.error('构建更新索引失败：' + e.message)
+        // 回退为纯新增
+        upsertEnabled.value = false
+      }
+    }
     
     // 批量处理数据，每批200条
     const batchSize = 200
@@ -571,44 +669,75 @@ const importData = async () => {
     
     for (let i = 0; i < totalRows; i += batchSize) {
       const batch = excelData.value.slice(i, i + batchSize)
-      const batchRecords = []
-      
-      // 准备批量记录
+      const batchRecordsToCreate = []
+      const batchRecordsToUpdate = [] // { recordId, fields }
+
+      // 准备当前批次记录
       for (const row of batch) {
         try {
           const fields = {}
           columnMapping.value.forEach((mapping, index) => {
             if (mapping) {
-              // 使用字段ID而不是字段名称
               const fieldId = mapping
               const fieldValue = row[excelColumns.value[index]]
               if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '') {
-                fields[fieldId] = fieldValue
+                // 若为更新模式，匹配用的条件字段不写入（无论其类型），
+                // 防止自动编号等受限字段导致写入失败；由其余字段完成更新/新增。
+                if (upsertEnabled.value && fieldId === upsertFieldId) {
+                  // 跳过写入条件字段
+                } else {
+                  fields[fieldId] = fieldValue
+                }
               }
             }
           })
-          batchRecords.push({ fields })
+
+          if (upsertEnabled.value && upsertFieldId) {
+            const keyValue = row[excelColumns.value[upsertKeyIndex.value]]
+            const variants = makeKeyVariants(keyValue)
+            let hitId
+            for (const k of variants) {
+              if (existingIndex && existingIndex.has(k)) { hitId = existingIndex.get(k); break }
+            }
+            if (hitId) {
+              batchRecordsToUpdate.push({ recordId: hitId, fields })
+            } else {
+              batchRecordsToCreate.push({ fields })
+            }
+          } else {
+            batchRecordsToCreate.push({ fields })
+          }
         } catch (error) {
           console.error('准备记录失败:', error)
           errorCount++
         }
       }
-      
-      // 批量插入
-      try {
-        console.log('准备插入的记录:', batchRecords)
-        console.log('字段映射:', columnMapping.value)
-        console.log('表格列信息:', tableColumns.value)
-        
-        await table.addRecords(batchRecords)
-        successCount += batchRecords.length
-        ElMessage.success(`已导入 ${Math.min(i + batchSize, totalRows)}/${totalRows} 条记录`)
-      } catch (error) {
-        console.error('批量插入失败:', error)
-        console.error('失败的记录:', batchRecords)
-        errorCount += batchRecords.length
-        ElMessage.error(`第 ${Math.floor(i/batchSize) + 1} 批数据导入失败: ${error.message}`)
+
+      // 先执行更新（逐条）
+      if (batchRecordsToUpdate.length > 0) {
+        for (const item of batchRecordsToUpdate) {
+          try {
+            await table.setRecord(item.recordId, { fields: item.fields })
+            successCount += 1
+          } catch (err) {
+            console.error('更新记录失败:', err)
+            errorCount += 1
+          }
+        }
       }
+
+      // 再执行新增（批量）
+      if (batchRecordsToCreate.length > 0) {
+        try {
+          await table.addRecords(batchRecordsToCreate)
+          successCount += batchRecordsToCreate.length
+        } catch (error) {
+          console.error('批量新增失败:', error)
+          errorCount += batchRecordsToCreate.length
+        }
+      }
+
+      ElMessage.success(`已处理 ${Math.min(i + batchSize, totalRows)}/${totalRows} 行（更新 ${batchRecordsToUpdate.length}，新增 ${batchRecordsToCreate.length}）`)
     }
     
     importResult.value = { successCount, errorCount }
