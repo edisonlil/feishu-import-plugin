@@ -821,13 +821,15 @@ const importData = async () => {
           columnMapping.value.forEach((mapping, index) => {
             if (mapping) {
               const fieldId = mapping
-              const fieldValue = row[excelColumns.value[index]]
+              let fieldValue = row[excelColumns.value[index]]
               if (fieldValue !== undefined && fieldValue !== null && fieldValue !== '') {
                 // 若为更新模式，匹配用的条件字段不写入（无论其类型），
                 // 防止自动编号等受限字段导致写入失败；由其余字段完成更新/新增。
                 if (upsertEnabled.value && fieldId === upsertFieldId) {
                   // 跳过写入条件字段
                 } else {
+                  // 数据类型转换处理
+                  fieldValue = convertFieldValue(fieldValue, fieldId)
                   fields[fieldId] = fieldValue
                 }
               }
@@ -911,6 +913,110 @@ const resetImport = () => {
   columnMapping.value = []
   previewData.value = []
   importResult.value = { successCount: 0, errorCount: 0 }
+}
+
+// 数据类型转换处理
+const convertFieldValue = (value, fieldId) => {
+  if (value === undefined || value === null || value === '') {
+    return value
+  }
+
+  // 获取字段信息
+  const field = tableColumns.value.find(col => col.id === fieldId)
+  if (!field) return value
+
+  const fieldType = field.type
+  const stringValue = String(value).trim()
+
+  try {
+    // 根据字段类型进行转换
+    switch (fieldType) {
+      case 1: // 文本字段
+        return stringValue
+
+      case 2: // 数字字段
+        // 尝试转换为数字
+        const numValue = parseFloat(stringValue)
+        if (!isNaN(numValue)) {
+          return numValue
+        }
+        // 如果转换失败，尝试清理字符串中的非数字字符
+        const cleanNum = stringValue.replace(/[^\d.-]/g, '')
+        const cleanNumValue = parseFloat(cleanNum)
+        if (!isNaN(cleanNumValue)) {
+          return cleanNumValue
+        }
+        // 如果还是失败，返回原值（让系统处理）
+        return stringValue
+
+      case 3: // 单选字段
+        return stringValue
+
+      case 4: // 多选字段
+        // 如果是数组，直接返回；如果是字符串，尝试分割
+        if (Array.isArray(value)) {
+          return value
+        }
+        // 尝试按逗号分割
+        return stringValue.split(',').map(item => item.trim()).filter(item => item)
+
+      case 5: // 日期字段
+        // 尝试解析日期
+        const dateValue = new Date(stringValue)
+        if (!isNaN(dateValue.getTime())) {
+          return dateValue.getTime() // 返回时间戳
+        }
+        return stringValue
+
+      case 7: // 复选框字段
+        // 转换为布尔值
+        if (stringValue.toLowerCase() === 'true' || stringValue === '1' || stringValue === '是') {
+          return true
+        }
+        if (stringValue.toLowerCase() === 'false' || stringValue === '0' || stringValue === '否') {
+          return false
+        }
+        return Boolean(stringValue)
+
+      case 8: // 人员字段
+        return stringValue
+
+      case 9: // 电话字段
+        return stringValue
+
+      case 10: // 邮箱字段
+        return stringValue
+
+      case 11: // URL字段
+        return stringValue
+
+      case 12: // 货币字段
+        // 类似数字字段处理
+        const currencyValue = parseFloat(stringValue.replace(/[^\d.-]/g, ''))
+        if (!isNaN(currencyValue)) {
+          return currencyValue
+        }
+        return stringValue
+
+      case 13: // 百分比字段
+        // 处理百分比
+        const percentValue = parseFloat(stringValue.replace('%', ''))
+        if (!isNaN(percentValue)) {
+          return percentValue / 100 // 转换为小数
+        }
+        return stringValue
+
+      case 15: // 自动编号字段
+        // 自动编号字段通常不能手动设置值
+        return stringValue
+
+      default:
+        return stringValue
+    }
+  } catch (error) {
+    console.warn(`字段 ${fieldId} 值转换失败:`, error)
+    return value
+  }
 }
 
 onMounted(async () => {
