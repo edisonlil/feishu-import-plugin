@@ -112,10 +112,6 @@
         <el-table-column v-for="f in selectedFieldIds" :key="f" :prop="f" :label="getFieldName(f)" />
       </el-table>
     </div>
-
-    <div class="step-actions">
-      <el-button type="primary" @click="exportExcel" :disabled="selectedFieldIds.length === 0" :loading="exporting">导出Excel</el-button>
-    </div>
   </div>
 </template>
 
