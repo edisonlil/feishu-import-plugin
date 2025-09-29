@@ -1,9 +1,18 @@
 <template>
   <div class="step-content">
     <h3>导出配置</h3>
-    <p class="step-description">从当前多维表格导出为 Excel，支持相邻相同值合并与数字列合并策略。</p>
+    <p class="step-description">从当前多维表格导出为 Excel，支持相邻相同值合并与数字列合并策略。导出字段为当前视图的可见字段，支持自定义筛选条件进行数据过滤。</p>
 
     <div class="export-controls">
+      <div class="view-info" v-if="viewInfo">
+        <el-alert
+          :title="`当前视图: ${viewInfo.name}`"
+          :description="`可见字段 ${tableColumns.length} 个，数据记录 ${cachedRecords.length} 条${filterEnabled ? `，筛选后 ${filteredRecordCount} 条` : ''}`"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+      </div>
       <el-form label-width="100px" class="export-form">
         <el-form-item label="导出字段">
           <el-select v-model="selectedFieldIds" multiple collapse-tags filterable placeholder="选择导出字段" style="width: 420px">
@@ -26,6 +35,69 @@
             <el-option label="取平均值" value="average" />
           </el-select>
         </el-form-item>
+        <el-form-item label="数据筛选">
+          <el-switch v-model="filterEnabled" />
+          <span class="filter-tip">启用自定义筛选条件</span>
+        </el-form-item>
+        <div v-if="filterEnabled" class="filter-conditions">
+          <div v-for="(condition, index) in filterConditions" :key="index" class="filter-condition">
+            <el-select v-model="condition.fieldId" placeholder="选择字段" style="width: 150px">
+              <el-option v-for="field in tableColumns" :key="field.id" :label="field.name" :value="field.id" />
+            </el-select>
+            <el-select v-model="condition.operator" placeholder="条件" style="width: 120px">
+              <el-option label="等于" value="eq" />
+              <el-option label="不等于" value="ne" />
+              <el-option label="包含" value="contains" />
+              <el-option label="不包含" value="not_contains" />
+              <el-option label="大于" value="gt" />
+              <el-option label="小于" value="lt" />
+              <el-option label="大于等于" value="gte" />
+              <el-option label="小于等于" value="lte" />
+              <el-option label="为空" value="empty" />
+              <el-option label="不为空" value="not_empty" />
+            </el-select>
+            <el-input 
+              v-model="condition.value" 
+              placeholder="匹配值" 
+              style="width: 150px"
+              :disabled="condition.operator === 'empty' || condition.operator === 'not_empty'"
+            />
+            <el-button type="danger" size="small" @click="removeFilterCondition(index)">删除</el-button>
+          </div>
+          <el-button type="primary" size="small" @click="addFilterCondition">添加筛选条件</el-button>
+          <el-button type="info" size="small" @click="testFilter" :disabled="!filterConditions.length">测试筛选</el-button>
+          
+          <!-- 调试信息 -->
+          <div v-if="filterConditions.length > 0" class="debug-info">
+            <el-alert
+              :title="`筛选状态: ${filterEnabled ? '已启用' : '已禁用'}`"
+              :description="`原始数据: ${cachedRecords.length} 条，筛选后: ${filteredRecordCount} 条`"
+              :type="filteredRecordCount > 0 ? 'success' : 'warning'"
+              :closable="false"
+              show-icon
+            />
+            <div v-if="filteredRecordCount === 0 && filterEnabled" class="debug-tips">
+              <p><strong>筛选无结果可能的原因：</strong></p>
+              <ul>
+                <li>检查字段名称是否正确</li>
+                <li>检查筛选条件是否合理</li>
+                <li>检查匹配值是否正确</li>
+                <li>尝试使用"包含"而不是"等于"</li>
+              </ul>
+              
+              <!-- 显示字段值示例 -->
+              <div v-if="cachedRecords.length > 0" class="field-samples">
+                <p><strong>字段值示例（前3条记录）：</strong></p>
+                <div v-for="(condition, index) in filterConditions" :key="index" class="field-sample">
+                  <strong>{{ getFieldName(condition.fieldId) }}:</strong>
+                  <div v-for="(record, recordIndex) in cachedRecords.slice(0, 3)" :key="recordIndex" class="sample-value">
+                    记录{{ recordIndex + 1 }}: {{ formatFieldValue(record.fields[condition.fieldId]) }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <el-form-item label="文件名">
           <el-input v-model="fileName" placeholder="导出文件名" style="width: 420px" />
         </el-form-item>
@@ -61,9 +133,59 @@ const exporting = ref(false)
 const loading = ref(false)
 const cachedRecords = ref([]) // 原始记录缓存
 const mergeFieldIds = ref([]) // 指定需要执行合并的字段（为空则默认所有选中字段）
+const viewInfo = ref(null) // 当前视图信息
+const filterEnabled = ref(false) // 是否启用筛选
+const filterConditions = ref([]) // 筛选条件
 
 const getFieldName = (id) => tableColumns.value.find(c => c.id === id)?.name || id
 const getFieldType = (id) => tableColumns.value.find(c => c.id === id)?.type
+
+// 格式化字段值用于显示
+const formatFieldValue = (value) => {
+  if (value === null || value === undefined) {
+    return '(空)'
+  }
+  if (typeof value === 'object') {
+    if (Array.isArray(value)) {
+      // 处理飞书文本字段的段落数组
+      return value.map(segment => {
+        if (typeof segment === 'object') {
+          // 文本段落
+          if (segment.type === 'text' && segment.text) {
+            return segment.text
+          }
+          // URL段落
+          if (segment.type === 'url' && segment.text) {
+            return segment.text
+          }
+          // 人员段落
+          if (segment.mentionType === 'User' && segment.name) {
+            return segment.name
+          }
+          // 文档段落
+          if (segment.mentionType && segment.text) {
+            return segment.text
+          }
+          // 其他对象
+          if (segment.name) {
+            return segment.name
+          }
+          if (segment.text) {
+            return segment.text
+          }
+        }
+        return String(segment)
+      }).join('')
+    } else if (value.name) {
+      return value.name
+    } else if (value.text) {
+      return value.text
+    } else {
+      return JSON.stringify(value)
+    }
+  }
+  return String(value)
+}
 
 const formatDate = (v) => {
   const d = typeof v === 'number' ? new Date(v) : new Date(String(v))
@@ -178,35 +300,75 @@ const loadColumns = async () => {
       cachedRecords.value = []
       return
     }
+    
     const selection = await getValidSelection()
     if (!selection || !selection.tableId) {
       console.warn('未获取到当前表选择，稍后重试或请在表中选中一个表。')
       return
     }
+    
     const table = await bitable.base.getTableById(selection.tableId)
+    
+    // 获取当前视图的可见字段（未隐藏的字段）
+    let visibleFieldIds = []
+    let allFields = []
+    
+    if (selection.viewId) {
+      try {
+        // 获取当前视图
+        const view = await table.getViewById(selection.viewId)
+        // 获取视图元信息
+        const viewMeta = await table.getViewMetaById(selection.viewId)
+        viewInfo.value = {
+          id: viewMeta.id,
+          name: viewMeta.name,
+          type: viewMeta.type
+        }
+        // 获取视图中的可见字段ID列表（有序）
+        visibleFieldIds = await view.getVisibleFieldIdList()
+        console.log('当前视图可见字段:', visibleFieldIds)
+      } catch (viewError) {
+        console.warn('获取视图字段失败，使用全部字段:', viewError)
+        viewInfo.value = null
+      }
+    }
+    
+    // 获取所有字段元信息
     const fields = await table.getFieldMetaList()
-    tableColumns.value = fields.map(f => ({ id: f.id, name: f.name, type: f.type }))
-    // 默认选中全部字段
+    allFields = fields.map(f => ({ id: f.id, name: f.name, type: f.type }))
+    
+    // 如果有可见字段列表，则只显示可见字段；否则显示所有字段
+    if (visibleFieldIds.length > 0) {
+      tableColumns.value = allFields.filter(field => visibleFieldIds.includes(field.id))
+    } else {
+      tableColumns.value = allFields
+    }
+    
+    // 默认选中所有可用字段
     if (!selectedFieldIds.value.length) {
       selectedFieldIds.value = tableColumns.value.map(c => c.id)
     }
-    // 拉取前1000条作为预览/导出数据源
-    // 优先使用当前视图的筛选结果，否则使用全部记录
+    
+    // 拉取当前视图的数据
     let records
     try {
-      // 尝试获取当前视图的筛选记录
       if (selection.viewId) {
-        records = await table.getRecordsByView(selection.viewId, { pageSize: 1000 })
+        // 使用当前视图获取数据（包含筛选和排序）
+        const view = await table.getViewById(selection.viewId)
+        records = await view.getRecords({ pageSize: 1000 })
       } else {
+        // 如果没有视图，获取全部记录
         records = await table.getRecords({ pageSize: 1000 })
       }
     } catch (viewError) {
-      console.warn('获取视图筛选记录失败，使用全部记录:', viewError)
+      console.warn('获取视图数据失败，使用全部记录:', viewError)
       records = await table.getRecords({ pageSize: 1000 })
     }
+    
     cachedRecords.value = records.records
+    console.log('加载完成，字段数:', tableColumns.value.length, '记录数:', cachedRecords.value.length)
   } catch (e) {
-    console.error(e)
+    console.error('加载字段和数据失败:', e)
   } finally {
     loading.value = false
   }
@@ -260,11 +422,21 @@ const applyNumberPolicy = (rows, fieldIds, mode) => {
 
 const previewRows = computed(() => {
   if (!cachedRecords.value.length) return []
-  return cachedRecords.value.slice(0, 200).map(r => {
+  
+  // 应用筛选条件
+  const filteredRecords = applyFilters(cachedRecords.value)
+  
+  return filteredRecords.slice(0, 200).map(r => {
     const obj = {}
     selectedFieldIds.value.forEach(fid => obj[fid] = normalizeForDisplay(fid, r.fields[fid]))
     return obj
   })
+})
+
+// 筛选后的记录数量
+const filteredRecordCount = computed(() => {
+  if (!cachedRecords.value.length) return 0
+  return applyFilters(cachedRecords.value).length
 })
 
 watch(selectedFieldIds, () => {
@@ -278,6 +450,183 @@ onMounted(() => {
 
 const selectAll = () => { selectedFieldIds.value = tableColumns.value.map(c => c.id) }
 const clearAll = () => { selectedFieldIds.value = [] }
+
+// 筛选条件管理
+const addFilterCondition = () => {
+  filterConditions.value.push({
+    fieldId: '',
+    operator: 'eq',
+    value: ''
+  })
+}
+
+const removeFilterCondition = (index) => {
+  filterConditions.value.splice(index, 1)
+}
+
+// 测试筛选功能
+const testFilter = () => {
+  console.log('=== 开始测试筛选 ===')
+  console.log('原始数据:', cachedRecords.value)
+  console.log('筛选条件:', filterConditions.value)
+  
+  const testResult = applyFilters(cachedRecords.value)
+  console.log('筛选结果:', testResult)
+  
+  // 显示前几条匹配的记录作为示例
+  if (testResult.length > 0) {
+    console.log('匹配的记录示例:')
+    testResult.slice(0, 3).forEach((record, index) => {
+      console.log(`记录 ${index + 1}:`, record)
+    })
+  } else {
+    console.log('没有匹配的记录')
+    
+    // 显示一些原始数据作为参考
+    console.log('原始数据示例:')
+    cachedRecords.value.slice(0, 3).forEach((record, index) => {
+      console.log(`原始记录 ${index + 1}:`, record)
+    })
+  }
+  
+  console.log('=== 筛选测试完成 ===')
+}
+
+// 筛选数据
+const applyFilters = (records) => {
+  if (!filterEnabled.value || !filterConditions.value.length) {
+    return records
+  }
+  
+  console.log('开始筛选，原始记录数:', records.length)
+  console.log('筛选条件:', filterConditions.value)
+  
+  const filteredRecords = records.filter(record => {
+    const matches = filterConditions.value.every(condition => {
+      if (!condition.fieldId) {
+        console.log('跳过空字段ID的条件')
+        return true
+      }
+      
+      const fieldValue = record.fields[condition.fieldId]
+      const conditionValue = condition.value
+      const operator = condition.operator
+      
+      console.log(`检查字段 ${condition.fieldId}: 值="${fieldValue}", 条件="${conditionValue}", 操作符="${operator}"`)
+      
+      // 处理空值情况
+      if (operator === 'empty') {
+        const isEmpty = fieldValue === null || fieldValue === undefined || fieldValue === ''
+        console.log('空值检查结果:', isEmpty)
+        return isEmpty
+      }
+      if (operator === 'not_empty') {
+        const isNotEmpty = fieldValue !== null && fieldValue !== undefined && fieldValue !== ''
+        console.log('非空值检查结果:', isNotEmpty)
+        return isNotEmpty
+      }
+      
+      // 如果条件值为空，跳过此条件
+      if (!conditionValue) {
+        console.log('条件值为空，跳过')
+        return true
+      }
+      
+      // 处理字段值，考虑不同的数据类型
+      let fieldStr = ''
+      if (fieldValue === null || fieldValue === undefined) {
+        fieldStr = ''
+      } else if (typeof fieldValue === 'object') {
+        if (Array.isArray(fieldValue)) {
+          // 处理飞书文本字段的段落数组
+          fieldStr = fieldValue.map(segment => {
+            if (typeof segment === 'object') {
+              // 文本段落
+              if (segment.type === 'text' && segment.text) {
+                return segment.text
+              }
+              // URL段落
+              if (segment.type === 'url' && segment.text) {
+                return segment.text
+              }
+              // 人员段落
+              if (segment.mentionType === 'User' && segment.name) {
+                return segment.name
+              }
+              // 文档段落
+              if (segment.mentionType && segment.text) {
+                return segment.text
+              }
+              // 其他对象
+              if (segment.name) {
+                return segment.name
+              }
+              if (segment.text) {
+                return segment.text
+              }
+            }
+            return String(segment)
+          }).join('')
+        } else if (fieldValue.name) {
+          fieldStr = fieldValue.name
+        } else if (fieldValue.text) {
+          fieldStr = fieldValue.text
+        } else {
+          fieldStr = String(fieldValue)
+        }
+      } else {
+        fieldStr = String(fieldValue)
+      }
+      
+      const conditionStr = String(conditionValue)
+      
+      // 转换为小写进行比较（仅对文本比较）
+      const fieldStrLower = fieldStr.toLowerCase()
+      const conditionStrLower = conditionStr.toLowerCase()
+      
+      let result = false
+      switch (operator) {
+        case 'eq':
+          result = fieldStr === conditionStr
+          break
+        case 'ne':
+          result = fieldStr !== conditionStr
+          break
+        case 'contains':
+          result = fieldStrLower.includes(conditionStrLower)
+          break
+        case 'not_contains':
+          result = !fieldStrLower.includes(conditionStrLower)
+          break
+        case 'gt':
+          result = parseFloat(fieldValue) > parseFloat(conditionValue)
+          break
+        case 'lt':
+          result = parseFloat(fieldValue) < parseFloat(conditionValue)
+          break
+        case 'gte':
+          result = parseFloat(fieldValue) >= parseFloat(conditionValue)
+          break
+        case 'lte':
+          result = parseFloat(fieldValue) <= parseFloat(conditionValue)
+          break
+        default:
+          result = true
+      }
+      
+      console.log(`筛选结果: "${fieldStr}" ${operator} "${conditionStr}" = ${result}`)
+      return result
+    })
+    
+    if (matches) {
+      console.log('记录匹配:', record)
+    }
+    return matches
+  })
+  
+  console.log('筛选完成，结果记录数:', filteredRecords.length)
+  return filteredRecords
+}
 
 const isTextField = (fid) => tableColumns.value.find(c => c.id === fid)?.type === 1
 const normalizeTextKey = (v) => String(v ?? '').trim().toLowerCase()
@@ -313,19 +662,23 @@ const exportExcel = async () => {
         const table = await bitable.base.getTableById(selection.tableId)
         let res
         try {
-          // 尝试获取当前视图的筛选记录
+          // 使用正确的SDK方法获取当前视图数据
           if (selection.viewId) {
-            res = await table.getRecordsByView(selection.viewId, { pageSize: 1000 })
+            const view = await table.getViewById(selection.viewId)
+            res = await view.getRecords({ pageSize: 1000 })
           } else {
             res = await table.getRecords({ pageSize: 1000 })
           }
         } catch (viewError) {
-          console.warn('获取视图筛选记录失败，使用全部记录:', viewError)
+          console.warn('获取视图数据失败，使用全部记录:', viewError)
           res = await table.getRecords({ pageSize: 1000 })
         }
         records = res.records
       }
-      rows = records.map(r => {
+      // 应用筛选条件
+      const filteredRecords = applyFilters(records)
+      
+      rows = filteredRecords.map(r => {
         const obj = {}
         selectedFieldIds.value.forEach(fid => obj[fid] = normalizeForDisplay(fid, r.fields[fid]))
         return obj
@@ -375,6 +728,105 @@ const exportExcel = async () => {
   padding: 20px; 
   margin-bottom: 16px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.view-info {
+  margin-bottom: 16px;
+}
+
+.view-info :deep(.el-alert) {
+  border-radius: 8px;
+  border: 1px solid #e0f2fe;
+  background: linear-gradient(135deg, #f0f8ff 0%, #e0f2fe 100%);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
+}
+
+.filter-tip {
+  margin-left: 8px;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.filter-conditions {
+  margin: 16px 0;
+  padding: 16px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.filter-condition {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px;
+  background: white;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+.filter-condition:last-child {
+  margin-bottom: 0;
+}
+
+.debug-info {
+  margin-top: 16px;
+  padding: 12px;
+  background: #f0f9ff;
+  border-radius: 6px;
+  border: 1px solid #bae6fd;
+}
+
+.debug-tips {
+  margin-top: 8px;
+  padding: 8px;
+  background: #fef3c7;
+  border-radius: 4px;
+  border: 1px solid #f59e0b;
+}
+
+.debug-tips p {
+  margin: 0 0 8px 0;
+  color: #92400e;
+  font-size: 14px;
+}
+
+.debug-tips ul {
+  margin: 0;
+  padding-left: 20px;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.debug-tips li {
+  margin: 4px 0;
+}
+
+.field-samples {
+  margin-top: 12px;
+  padding: 8px;
+  background: #f3f4f6;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+}
+
+.field-sample {
+  margin: 8px 0;
+  padding: 6px;
+  background: white;
+  border-radius: 4px;
+  border: 1px solid #e5e7eb;
+}
+
+.sample-value {
+  margin: 2px 0;
+  padding: 2px 6px;
+  background: #f9fafb;
+  border-radius: 3px;
+  font-size: 12px;
+  color: #374151;
+  font-family: monospace;
 }
 
 h3 {
@@ -440,6 +892,17 @@ h3::before {
   
   .step-actions .el-button {
     width: 100%;
+  }
+  
+  .filter-condition {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  
+  .filter-condition .el-select,
+  .filter-condition .el-input {
+    width: 100% !important;
   }
 }
 
