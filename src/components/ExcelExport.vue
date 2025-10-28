@@ -1,7 +1,7 @@
 <template>
   <div class="step-content">
     <h3>导出配置</h3>
-    <p class="step-description">从当前多维表格导出为 Excel，支持相邻相同值合并与数字列合并策略。导出字段为当前视图的可见字段，支持自定义筛选条件进行数据过滤。</p>
+    <p class="step-description">从当前多维表格导出为 Excel。导出字段为当前视图的可见字段，支持自定义筛选条件进行数据过滤。</p>
 
     <div class="export-controls">
       <div class="view-info" v-if="viewInfo">
@@ -20,20 +20,6 @@
           </el-select>
           <el-button class="ml8" @click="selectAll">全选</el-button>
           <el-button class="ml4" @click="clearAll">清空</el-button>
-        </el-form-item>
-        <el-form-item label="相同行合并">
-          <el-switch v-model="mergeEnabled" />
-        </el-form-item>
-        <el-form-item v-if="mergeEnabled" label="合并字段">
-          <el-select v-model="mergeFieldIds" multiple collapse-tags filterable placeholder="选择需要合并的字段" style="width: 420px">
-            <el-option v-for="c in tableColumns" :key="c.id" :label="c.name" :value="c.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="数字策略">
-          <el-select v-model="numberMergeMode" style="width: 180px">
-            <el-option label="保持首格值" value="fill" />
-            <el-option label="取平均值" value="average" />
-          </el-select>
         </el-form-item>
         <el-form-item label="数据筛选">
           <el-switch v-model="filterEnabled" />
@@ -122,13 +108,10 @@ import * as XLSX from 'xlsx'
 
 const tableColumns = ref([])
 const selectedFieldIds = ref([])
-const mergeEnabled = ref(true)
-const numberMergeMode = ref('fill')
 const fileName = ref('导出数据.xlsx')
 const exporting = ref(false)
 const loading = ref(false)
 const cachedRecords = ref([]) // 原始记录缓存
-const mergeFieldIds = ref([]) // 指定需要执行合并的字段（为空则默认所有选中字段）
 const viewInfo = ref(null) // 当前视图信息
 const filterEnabled = ref(false) // 是否启用筛选
 const filterConditions = ref([]) // 筛选条件
@@ -370,52 +353,6 @@ const loadColumns = async () => {
   }
 }
 
-const buildRowSpanMerges = (rows, fieldIds) => {
-  const merges = []
-  if (!rows.length) return merges
-  const matrix = rows.map(r => fieldIds.map(fid => r[fid]))
-  fieldIds.forEach((fid, c) => {
-    let s = 0
-    while (s < matrix.length) {
-      let e = s
-      const base = matrix[s][c]
-      while (e + 1 < matrix.length && matrix[e + 1][c] === base) e++
-      if (e > s) merges.push({ s: { r: s + 1, c }, e: { r: e + 1, c } })
-      s = e + 1
-    }
-  })
-  return merges
-}
-
-const applyNumberPolicy = (rows, fieldIds, mode) => {
-  const out = rows.map(r => ({ ...r }))
-  const isNumberField = (fid) => tableColumns.value.find(c => c.id === fid)?.type === 2
-  fieldIds.forEach(fid => {
-    if (!isNumberField(fid)) return
-    let s = 0
-    while (s < out.length) {
-      let e = s
-      const base = out[s][fid]
-      while (e + 1 < out.length && out[e + 1][fid] === base) e++
-      if (e > s) {
-        if (mode === 'average') {
-          let sum = 0, count = 0
-          for (let i = s; i <= e; i++) {
-            const v = parseFloat(String(out[i][fid]).replace(/[^\d.-]/g, ''))
-            if (!isNaN(v)) { sum += v; count++ }
-          }
-          const avg = count ? sum / count : parseFloat(String(base).replace(/[^\d.-]/g, ''))
-          for (let i = s; i <= e; i++) out[i][fid] = avg
-        } else {
-          for (let i = s + 1; i <= e; i++) out[i][fid] = out[s][fid]
-        }
-      }
-      s = e + 1
-    }
-  })
-  return out
-}
-
 const previewRows = computed(() => {
   if (!cachedRecords.value.length) return []
   
@@ -624,25 +561,6 @@ const applyFilters = (records) => {
   return filteredRecords
 }
 
-const isTextField = (fid) => tableColumns.value.find(c => c.id === fid)?.type === 1
-const normalizeTextKey = (v) => String(v ?? '').trim().toLowerCase()
-
-// 在执行合并前，如合并字段包含文本字段，则按这些文本字段顺序排序，便于相同值连续，从而合并
-const sortRowsForTextMerge = (rows, mergeTargets) => {
-  const textKeys = (mergeTargets || []).filter(isTextField)
-  if (!textKeys.length) return rows
-  const sorted = rows.slice().sort((a, b) => {
-    for (const fid of textKeys) {
-      const av = normalizeTextKey(a[fid])
-      const bv = normalizeTextKey(b[fid])
-      if (av < bv) return -1
-      if (av > bv) return 1
-    }
-    return 0
-  })
-  return sorted
-}
-
 const exportExcel = async () => {
   if (!selectedFieldIds.value.length) return
   try {
@@ -683,28 +601,10 @@ const exportExcel = async () => {
       rows = previewRows.value
     }
 
-    // 仅对被选为合并的字段应用策略
-    const mergeTargets = (mergeFieldIds.value && mergeFieldIds.value.length)
-      ? selectedFieldIds.value.filter(fid => mergeFieldIds.value.includes(fid))
-      : selectedFieldIds.value
-
-    // 文本字段排序，确保相同文本相邻以便合并
-    rows = sortRowsForTextMerge(rows, mergeTargets)
-
-    // 数字字段合并策略
-    rows = applyNumberPolicy(rows, mergeTargets, numberMergeMode.value)
-
     const header = selectedFieldIds.value.map(fid => getFieldName(fid))
     const aoa = [header]
     rows.forEach(r => aoa.push(selectedFieldIds.value.map(fid => r[fid])))
     const ws = XLSX.utils.aoa_to_sheet(aoa)
-    if (mergeEnabled.value) {
-      const mergeTargetsForMerges = (mergeFieldIds.value && mergeFieldIds.value.length)
-        ? selectedFieldIds.value.map(fid => mergeFieldIds.value.includes(fid) ? fid : null).filter(Boolean)
-        : selectedFieldIds.value
-      const merges = buildRowSpanMerges(rows, mergeTargetsForMerges)
-      if (merges.length) ws['!merges'] = merges
-    }
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, '导出数据')
     XLSX.writeFile(wb, fileName.value || '导出数据.xlsx')
